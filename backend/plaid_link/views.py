@@ -174,8 +174,8 @@ class InvestmentTransactionsView(APIView):
             )
 
         today = datetime.date.today()
-        # Default to past 90 days if not provided
-        start_date_str = request.query_params.get('start_date', (today - datetime.timedelta(days=90)).isoformat())
+        # Default to past 730 days (2 years, full available Plaid investment history) if not provided
+        start_date_str = request.query_params.get('start_date', (today - datetime.timedelta(days=730)).isoformat())
         end_date_str = request.query_params.get('end_date', today.isoformat())
 
         try:

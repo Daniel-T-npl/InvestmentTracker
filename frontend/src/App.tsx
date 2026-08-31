@@ -1,71 +1,31 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   TrendingUp,
   Building2,
   Wallet,
-  Coins,
-  ArrowUpDown,
   RefreshCw,
   Trash2,
   AlertCircle,
   Code,
   ChevronDown,
   ChevronUp,
+  Lock,
+  Unlock,
+  Users,
 } from 'lucide-react'
 import { PlaidLinkButton } from './components/PlaidLinkButton'
-
-interface PlaidItemRecord {
-  item_id: string
-  institution_id: string | null
-  institution_name: string | null
-  created_at: string
-  updated_at: string
-}
-
-interface Account {
-  account_id: string
-  item_id?: string
-  institution_name?: string
-  name: string
-  mask?: string
-  type: string
-  subtype: string
-  balances: {
-    current: number | null
-    available: number | null
-    iso_currency_code: string | null
-  }
-}
-
-interface Holding {
-  account_id: string
-  security_id: string
-  institution_price: number
-  institution_value: number
-  cost_basis: number | null
-  quantity: number
-}
-
-interface Security {
-  security_id: string
-  name: string | null
-  ticker_symbol: string | null
-  type: string | null
-  close_price: number | null
-}
-
-interface InvestmentTransaction {
-  investment_transaction_id: string
-  account_id: string
-  security_id: string | null
-  date: string
-  name: string
-  quantity: number
-  amount: number
-  price: number
-  type: string
-  subtype: string
-}
+import { PortfolioChart } from './components/PortfolioChart'
+import { HoldingsTable } from './components/HoldingsTable'
+import { MetricCards } from './components/MetricCards'
+import { TransactionsTable } from './components/TransactionsTable'
+import {
+  PlaidItemRecord,
+  Account,
+  Holding,
+  Security,
+  InvestmentTransaction,
+} from './types'
+import { processHoldings } from './utils/calculations'
 
 export default function App() {
   const [items, setItems] = useState<PlaidItemRecord[]>([])
@@ -75,8 +35,24 @@ export default function App() {
   const [transactions, setTransactions] = useState<InvestmentTransaction[]>([])
   const [loading, setLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
+  const [selectedTicker, setSelectedTicker] = useState<string>('ALL')
   const [showRawJson, setShowRawJson] = useState<boolean>(false)
   const [rawPayload, setRawPayload] = useState<any>(null)
+
+  // Admin vs Public / Family View Mode
+  const [isAdmin, setIsAdmin] = useState<boolean>(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('admin') === 'true' || window.location.hash === '#admin') {
+      return true
+    }
+    return localStorage.getItem('it_admin_mode') === 'true'
+  })
+
+  const toggleAdmin = () => {
+    const nextState = !isAdmin
+    setIsAdmin(nextState)
+    localStorage.setItem('it_admin_mode', String(nextState))
+  }
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -93,20 +69,23 @@ export default function App() {
         const holdingsRes = await fetch('/api/plaid/holdings/')
         const holdingsData = await holdingsRes.json()
 
+        let fetchedHoldings: Holding[] = []
+        let secMap: Record<string, Security> = {}
+
         if (holdingsRes.ok) {
           setAccounts(holdingsData.accounts || [])
-          setHoldings(holdingsData.holdings || [])
+          fetchedHoldings = holdingsData.holdings || []
+          setHoldings(fetchedHoldings)
 
           // Index securities by security_id
-          const secMap: Record<string, Security> = {}
           for (const s of holdingsData.securities || []) {
             secMap[s.security_id] = s
           }
           setSecurities(secMap)
         }
 
-        // 3. Fetch Investment Transactions
-        const txRes = await fetch('/api/plaid/investment_transactions/')
+        // 3. Fetch Investment Transactions (fetch all available history from inception)
+        const txRes = await fetch('/api/plaid/investment_transactions/?start_date=2020-01-01')
         const txData = await txRes.json()
         if (txRes.ok) {
           setTransactions(txData.investment_transactions || [])
@@ -138,6 +117,7 @@ export default function App() {
         method: 'DELETE',
       })
       if (res.ok) {
+        setSelectedTicker('ALL')
         fetchData()
       } else {
         const d = await res.json()
@@ -149,19 +129,58 @@ export default function App() {
   }
 
   // Calculate total portfolio balance
-  const totalBalance = accounts.reduce((acc, a) => acc + (a.balances.current || 0), 0)
+  const totalAccountBalance = useMemo(
+    () => accounts.reduce((acc, a) => acc + (a.balances.current || 0), 0),
+    [accounts]
+  )
+
+  // Calculate total holdings value
+  const totalHoldingsValue = useMemo(
+    () => holdings.reduce((acc, h) => acc + (h.institution_value || h.quantity * h.institution_price), 0),
+    [holdings]
+  )
+
+  const effectiveTotalValue = totalHoldingsValue > 0 ? totalHoldingsValue : totalAccountBalance
+
+  // Process holdings with gains, percentage return, portfolio allocation
+  const processedHoldings = useMemo(() => {
+    return processHoldings(holdings, securities, effectiveTotalValue)
+  }, [holdings, securities, effectiveTotalValue])
+
+  const handleSelectTicker = (ticker: string) => {
+    setSelectedTicker(ticker)
+    // Scroll to chart smoothly if user clicked on table
+    window.scrollTo({ top: 180, behavior: 'smooth' })
+  }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-      {/* Top Navbar */}
-      <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur px-6 py-4 flex items-center justify-between sticky top-0 z-10">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500/30 selection:text-emerald-200">
+      {/* Top Header Navbar */}
+      <header className="border-b border-slate-800/80 bg-slate-900/70 backdrop-blur-md px-6 py-4 flex items-center justify-between sticky top-0 z-30">
         <div className="flex items-center space-x-3">
-          <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400 border border-emerald-500/20">
+          <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400 border border-emerald-500/20 shadow-sm shadow-emerald-500/10">
             <TrendingUp className="w-6 h-6" />
           </div>
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-white">InvestmentTracker</h1>
-            <p className="text-xs text-slate-400">Plaid Integration Testing</p>
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl font-bold tracking-tight text-white">InvestmentTracker</h1>
+              {isAdmin ? (
+                <button
+                  onClick={toggleAdmin}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-semibold cursor-pointer hover:bg-emerald-500/20 transition"
+                  title="Click to switch to Family View"
+                >
+                  <Unlock className="w-3 h-3" />
+                  Admin Mode
+                </button>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-[10px] font-medium">
+                  <Users className="w-3 h-3" />
+                  Family View
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-400">Live Portfolio & Securities Analytics</p>
           </div>
         </div>
 
@@ -169,277 +188,225 @@ export default function App() {
           <button
             onClick={fetchData}
             disabled={loading}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-xs font-medium text-slate-200 transition disabled:opacity-50"
-            title="Refresh Data"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 active:bg-slate-600 border border-slate-700 text-xs font-medium text-slate-200 transition disabled:opacity-50 cursor-pointer shadow-sm"
+            title="Refresh Portfolio Data"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
+            <span>Refresh</span>
           </button>
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-6 md:p-10 space-y-8">
-        {/* Link Account Banner */}
-        <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 md:p-8 flex flex-col md:flex-row md:items-center justify-between gap-6">
-          <div className="space-y-1.5 max-w-xl">
-            <h2 className="text-2xl font-bold text-white tracking-tight">Link Your Accounts</h2>
-            <p className="text-sm text-slate-400">
-              Connect a bank or investment brokerage using Plaid Link (Sandbox credentials supported: e.g. <span className="text-emerald-400 font-mono text-xs">user_good / pass_good</span>).
-            </p>
-          </div>
-          <PlaidLinkButton onSuccess={fetchData} />
-        </section>
+      {/* Main Container */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 md:p-8 space-y-8">
+        {/* Plaid Link Connect Banner (Admin Only) */}
+        {isAdmin && (
+          <section className="bg-gradient-to-r from-slate-900 via-slate-900 to-slate-850 border border-slate-800 rounded-2xl p-6 md:p-8 flex flex-col md:flex-row md:items-center justify-between gap-6 shadow-xl">
+            <div className="space-y-2 max-w-2xl">
+              <h2 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+                <span>Connect & Track Investment Portfolios</span>
+                <span className="text-xs font-mono bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded border border-emerald-500/30">
+                  Admin Active
+                </span>
+              </h2>
+              <p className="text-sm text-slate-400 leading-relaxed">
+                Link brokerage and bank accounts via Plaid Link to analyze holdings, asset allocation, realized/unrealized profit & loss, and historical performance curves.
+                <span className="block mt-1 text-xs text-slate-500">
+                  Sandbox Demo Login: <code className="text-emerald-400 font-mono bg-slate-950 px-1.5 py-0.5 rounded border border-slate-800">user_good / pass_good</code>
+                </span>
+              </p>
+            </div>
+            <div className="shrink-0">
+              <PlaidLinkButton onSuccess={fetchData} />
+            </div>
+          </section>
+        )}
 
         {/* Global Error Banner */}
         {error && (
-          <div className="bg-rose-950/30 border border-rose-900/50 rounded-xl p-4 flex items-center gap-3 text-rose-300 text-sm">
+          <div className="bg-rose-950/30 border border-rose-900/50 rounded-2xl p-4 flex items-center gap-3 text-rose-300 text-sm shadow-lg">
             <AlertCircle className="w-5 h-5 text-rose-400 shrink-0" />
-            <span>{error}</span>
+            <span className="flex-1">{error}</span>
+            <button
+              onClick={fetchData}
+              className="text-xs font-semibold underline hover:text-rose-200"
+            >
+              Retry
+            </button>
           </div>
         )}
 
-        {/* Summary Metric Cards */}
-        <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-1">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span>Total Current Balance</span>
-              <Wallet className="w-4 h-4 text-emerald-400" />
-            </div>
-            <p className="text-2xl font-extrabold text-white">
-              ${totalBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </p>
-            <p className="text-[11px] text-slate-500">{accounts.length} active account{accounts.length === 1 ? '' : 's'}</p>
-          </div>
+        {/* Top Summary Metric Cards */}
+        <MetricCards
+          holdings={processedHoldings}
+          accounts={accounts}
+          items={items}
+          onSelectTicker={handleSelectTicker}
+        />
 
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-1">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span>Connected Institutions</span>
-              <Building2 className="w-4 h-4 text-blue-400" />
-            </div>
-            <p className="text-2xl font-extrabold text-white">{items.length}</p>
-            <p className="text-[11px] text-slate-500">Plaid Items linked</p>
-          </div>
+        {/* Interactive Portfolio & Ticker Graph */}
+        {processedHoldings.length > 0 && (
+          <PortfolioChart
+            holdings={processedHoldings}
+            transactions={transactions}
+            selectedTicker={selectedTicker}
+            onSelectTicker={setSelectedTicker}
+          />
+        )}
 
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-1">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span>Total Holdings</span>
-              <Coins className="w-4 h-4 text-purple-400" />
-            </div>
-            <p className="text-2xl font-extrabold text-white">{holdings.length}</p>
-            <p className="text-[11px] text-slate-500">Securities / assets</p>
-          </div>
-        </section>
+        {/* Holdings Table with Profit/Loss & % Return */}
+        {processedHoldings.length > 0 && (
+          <HoldingsTable
+            holdings={processedHoldings}
+            selectedTicker={selectedTicker}
+            onSelectTicker={handleSelectTicker}
+          />
+        )}
 
-        {/* Connected Institutions List */}
-        {items.length > 0 && (
-          <section className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
-            <h3 className="text-lg font-bold text-white flex items-center gap-2">
-              <Building2 className="w-5 h-5 text-blue-400" />
-              Connected Institutions
-            </h3>
-            <div className="divide-y divide-slate-800">
-              {items.map((item) => (
-                <div key={item.item_id} className="py-3 flex items-center justify-between first:pt-0 last:pb-0">
-                  <div>
-                    <p className="font-semibold text-white text-sm">
-                      {item.institution_name || 'Financial Institution'}
-                    </p>
-                    <p className="text-xs font-mono text-slate-500">Item ID: {item.item_id}</p>
-                  </div>
-                  <button
-                    onClick={() => handleUnlink(item.item_id)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 border border-rose-900/60 text-xs text-rose-300 transition"
-                    title="Unlink institution"
+        {/* Connected Institutions and Accounts Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Connected Institutions */}
+          {items.length > 0 && (
+            <section className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 shadow-xl">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-blue-400" />
+                Connected Institutions ({items.length})
+              </h3>
+              <div className="divide-y divide-slate-800/70">
+                {items.map((item) => (
+                  <div
+                    key={item.item_id}
+                    className="py-3 flex items-center justify-between first:pt-0 last:pb-0"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    Unlink
-                  </button>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {/* Accounts List */}
-        {accounts.length > 0 && (
-          <section className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
-            <h3 className="text-lg font-bold text-white flex items-center gap-2">
-              <Wallet className="w-5 h-5 text-emerald-400" />
-              Accounts
-            </h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {accounts.map((acc) => (
-                <div
-                  key={acc.account_id}
-                  className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-4 space-y-2"
-                >
-                  <div className="flex justify-between items-start">
                     <div>
-                      <h4 className="font-semibold text-sm text-slate-100">{acc.name}</h4>
-                      <p className="text-xs text-slate-500 capitalize">
-                        {acc.subtype || acc.type} {acc.mask ? `(•••• ${acc.mask})` : ''}
+                      <p className="font-semibold text-white text-sm">
+                        {item.institution_name || 'Financial Institution'}
+                      </p>
+                      <p className="text-[11px] font-mono text-emerald-400 flex items-center gap-1 mt-0.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                        Connected & Synchronized
                       </p>
                     </div>
-                    {acc.institution_name && (
-                      <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400">
-                        {acc.institution_name}
-                      </span>
+                    {isAdmin && (
+                      <button
+                        onClick={() => handleUnlink(item.item_id)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 border border-rose-900/60 text-xs text-rose-300 transition cursor-pointer"
+                        title="Unlink institution"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        Unlink
+                      </button>
                     )}
                   </div>
-                  <div className="pt-2 border-t border-slate-800/60 flex justify-between items-baseline">
-                    <span className="text-xs text-slate-400">Balance</span>
-                    <span className="font-mono font-bold text-white text-base">
-                      ${(acc.balances.current ?? 0).toLocaleString('en-US', {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
+                ))}
+              </div>
+            </section>
+          )}
 
-        {/* Holdings Table */}
-        {holdings.length > 0 && (
-          <section className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
-            <h3 className="text-lg font-bold text-white flex items-center gap-2">
-              <Coins className="w-5 h-5 text-purple-400" />
-              Investment Holdings
-            </h3>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-slate-800 text-slate-400 text-xs uppercase tracking-wider">
-                    <th className="py-3 px-4">Asset</th>
-                    <th className="py-3 px-4">Ticker</th>
-                    <th className="py-3 px-4 text-right">Shares</th>
-                    <th className="py-3 px-4 text-right">Price</th>
-                    <th className="py-3 px-4 text-right">Total Value</th>
-                    <th className="py-3 px-4 text-right">Cost Basis</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60 font-mono text-xs">
-                  {holdings.map((h, idx) => {
-                    const sec = securities[h.security_id]
-                    return (
-                      <tr key={idx} className="hover:bg-slate-800/30 transition">
-                        <td className="py-3 px-4 font-sans font-medium text-slate-200">
-                          {sec?.name || 'Unknown Security'}
-                        </td>
-                        <td className="py-3 px-4">
-                          <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-semibold">
-                            {sec?.ticker_symbol || 'N/A'}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-right text-slate-300">{h.quantity}</td>
-                        <td className="py-3 px-4 text-right text-slate-300">
-                          ${(h.institution_price || 0).toFixed(2)}
-                        </td>
-                        <td className="py-3 px-4 text-right font-bold text-emerald-400">
-                          ${(h.institution_value || 0).toLocaleString('en-US', {
-                            minimumFractionDigits: 2,
-                            maximumFractionDigits: 2,
-                          })}
-                        </td>
-                        <td className="py-3 px-4 text-right text-slate-400">
-                          {h.cost_basis ? `$${h.cost_basis.toFixed(2)}` : '—'}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
+          {/* Accounts Breakdown */}
+          {accounts.length > 0 && (
+            <section className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 lg:col-span-2 shadow-xl">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Wallet className="w-4 h-4 text-emerald-400" />
+                Linked Accounts ({accounts.length})
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {accounts.map((acc) => (
+                  <div
+                    key={acc.account_id}
+                    className="bg-slate-950/70 border border-slate-800/80 rounded-xl p-3.5 space-y-2 hover:border-slate-700 transition"
+                  >
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <h4 className="font-semibold text-xs text-slate-200">{acc.name}</h4>
+                        <p className="text-[11px] text-slate-500 capitalize">
+                          {acc.subtype || acc.type} {acc.mask ? `(•••• ${acc.mask})` : ''}
+                        </p>
+                      </div>
+                      {acc.institution_name && (
+                        <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700/50">
+                          {acc.institution_name}
+                        </span>
+                      )}
+                    </div>
+                    <div className="pt-2 border-t border-slate-800/60 flex justify-between items-baseline">
+                      <span className="text-[11px] text-slate-400">Balance</span>
+                      <span className="font-mono font-bold text-white text-sm">
+                        ${(acc.balances.current ?? 0).toLocaleString('en-US', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
 
         {/* Investment Transactions Table */}
-        {transactions.length > 0 && (
-          <section className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
-            <h3 className="text-lg font-bold text-white flex items-center gap-2">
-              <ArrowUpDown className="w-5 h-5 text-amber-400" />
-              Recent Investment Transactions
-            </h3>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-slate-800 text-slate-400 text-xs uppercase tracking-wider">
-                    <th className="py-3 px-4">Date</th>
-                    <th className="py-3 px-4">Description</th>
-                    <th className="py-3 px-4">Type</th>
-                    <th className="py-3 px-4 text-right">Shares</th>
-                    <th className="py-3 px-4 text-right">Price</th>
-                    <th className="py-3 px-4 text-right">Amount</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60 font-mono text-xs">
-                  {transactions.slice(0, 15).map((tx) => (
-                    <tr key={tx.investment_transaction_id} className="hover:bg-slate-800/30 transition">
-                      <td className="py-3 px-4 text-slate-400">{tx.date}</td>
-                      <td className="py-3 px-4 font-sans text-slate-200 font-medium">{tx.name}</td>
-                      <td className="py-3 px-4">
-                        <span className="capitalize px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-                          {tx.subtype || tx.type}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right text-slate-300">{tx.quantity || '—'}</td>
-                      <td className="py-3 px-4 text-right text-slate-300">
-                        {tx.price ? `$${tx.price.toFixed(2)}` : '—'}
-                      </td>
-                      <td
-                        className={`py-3 px-4 text-right font-bold ${
-                          tx.amount < 0 ? 'text-emerald-400' : 'text-slate-200'
-                        }`}
-                      >
-                        ${Math.abs(tx.amount).toFixed(2)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
+        <TransactionsTable
+          transactions={transactions}
+          securities={securities}
+          selectedTicker={selectedTicker}
+          onSelectTicker={handleSelectTicker}
+        />
 
         {/* Empty State */}
         {!loading && items.length === 0 && (
-          <div className="border border-dashed border-slate-800 rounded-2xl p-12 text-center space-y-3">
-            <Building2 className="w-12 h-12 text-slate-600 mx-auto" />
-            <h3 className="text-lg font-semibold text-slate-300">No Linked Accounts Yet</h3>
-            <p className="text-sm text-slate-500 max-w-md mx-auto">
-              Click the <span className="text-emerald-400 font-medium">Connect Account with Plaid</span> button above to test linking a sandbox brokerage or bank account.
-            </p>
+          <div className="border border-dashed border-slate-800 rounded-3xl p-12 text-center space-y-4 bg-slate-900/30">
+            <div className="w-16 h-16 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center mx-auto text-emerald-400 shadow-inner">
+              <Building2 className="w-8 h-8" />
+            </div>
+            <div className="space-y-1 max-w-md mx-auto">
+              <h3 className="text-lg font-bold text-white">No Linked Accounts Yet</h3>
+              <p className="text-sm text-slate-400">
+                {isAdmin
+                  ? 'Click the Connect Account with Plaid button above to test linking an account.'
+                  : 'Portfolio data will appear here once connected.'}
+              </p>
+            </div>
           </div>
         )}
 
-        {/* Raw JSON Debugger Accordion */}
-        <section className="border border-slate-800/80 rounded-xl overflow-hidden">
-          <button
-            onClick={() => setShowRawJson(!showRawJson)}
-            className="w-full bg-slate-900/80 hover:bg-slate-900 px-6 py-3 flex items-center justify-between text-xs font-semibold text-slate-400 transition"
-          >
-            <span className="flex items-center gap-2">
-              <Code className="w-4 h-4 text-slate-500" />
-              Raw API Payload Inspector (Debug)
-            </span>
-            {showRawJson ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-          </button>
-          {showRawJson && (
-            <div className="bg-slate-950 p-4 border-t border-slate-800">
-              <pre className="text-[11px] font-mono text-emerald-400/90 overflow-x-auto max-h-96">
-                {JSON.stringify(rawPayload, null, 2) || 'No data loaded yet'}
-              </pre>
-            </div>
-          )}
-        </section>
+        {/* Raw JSON Debugger Accordion (Admin Only) */}
+        {isAdmin && (
+          <section className="border border-slate-800/80 rounded-2xl overflow-hidden shadow-lg">
+            <button
+              onClick={() => setShowRawJson(!showRawJson)}
+              className="w-full bg-slate-900 hover:bg-slate-850 px-6 py-3.5 flex items-center justify-between text-xs font-semibold text-slate-400 transition cursor-pointer"
+            >
+              <span className="flex items-center gap-2">
+                <Code className="w-4 h-4 text-slate-500" />
+                Raw API Payload Inspector (Debug / Admin)
+              </span>
+              {showRawJson ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+            {showRawJson && (
+              <div className="bg-slate-950 p-4 border-t border-slate-800">
+                <pre className="text-[11px] font-mono text-emerald-400/90 overflow-x-auto max-h-96 leading-relaxed">
+                  {JSON.stringify(rawPayload, null, 2) || 'No data loaded yet'}
+                </pre>
+              </div>
+            )}
+          </section>
+        )}
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-slate-800/80 bg-slate-950 px-6 py-4 text-center text-xs text-slate-500">
-        InvestmentTracker &bull; Plaid Test View
+      <footer className="border-t border-slate-800/80 bg-slate-950 px-6 py-5 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 mt-auto gap-3">
+        <div>InvestmentTracker &bull; Real-time Plaid Integration & Analytics</div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={toggleAdmin}
+            className="inline-flex items-center gap-1 text-[11px] text-slate-600 hover:text-slate-400 transition cursor-pointer"
+            title={isAdmin ? 'Switch to Family View' : 'Switch to Admin Mode'}
+          >
+            {isAdmin ? <Unlock className="w-3 h-3 text-emerald-500" /> : <Lock className="w-3 h-3" />}
+            <span>{isAdmin ? 'Admin Mode Active' : 'Family View'}</span>
+          </button>
+        </div>
       </footer>
     </div>
   )
