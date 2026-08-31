@@ -174,25 +174,37 @@ class InvestmentTransactionsView(APIView):
             )
 
         today = datetime.date.today()
-        # Default to past 730 days (2 years, full available Plaid investment history) if not provided
-        start_date_str = request.query_params.get('start_date', (today - datetime.timedelta(days=730)).isoformat())
-        end_date_str = request.query_params.get('end_date', today.isoformat())
+        # Plaid supports up to 730 days (2 years) max for investment transactions
+        max_history_date = today - datetime.timedelta(days=730)
 
-        try:
-            start_date = datetime.date.fromisoformat(start_date_str)
-            end_date = datetime.date.fromisoformat(end_date_str)
-        except ValueError:
-            return Response(
-                {"error_message": "Dates must be formatted as YYYY-MM-DD"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        start_date_str = request.query_params.get('start_date')
+        end_date_str = request.query_params.get('end_date')
+
+        if start_date_str:
+            try:
+                start_date = datetime.date.fromisoformat(start_date_str)
+                if start_date < max_history_date:
+                    start_date = max_history_date
+            except ValueError:
+                start_date = max_history_date
+        else:
+            start_date = max_history_date
+
+        if end_date_str:
+            try:
+                end_date = datetime.date.fromisoformat(end_date_str)
+            except ValueError:
+                end_date = today
+        else:
+            end_date = today
 
         client = get_plaid_client()
         combined_transactions = []
         combined_securities = []
+        last_error = None
 
-        try:
-            for item in items:
+        for item in items:
+            try:
                 tx_request = InvestmentsTransactionsGetRequest(
                     access_token=item.access_token,
                     start_date=start_date,
@@ -203,18 +215,22 @@ class InvestmentTransactionsView(APIView):
 
                 combined_transactions.extend(res_dict.get('investment_transactions', []))
                 combined_securities.extend(res_dict.get('securities', []))
+            except plaid.ApiException as e:
+                last_error = parse_plaid_error(e)
+            except Exception as e:
+                last_error = {"error_message": str(e)}
 
-            unique_securities = {s['security_id']: s for s in combined_securities}.values()
+        if not combined_transactions and last_error and len(items) == 1:
+            # If the single item failed, return informative error
+            return Response(last_error, status=status.HTTP_400_BAD_REQUEST)
 
-            return Response({
-                "investment_transactions": combined_transactions,
-                "securities": list(unique_securities),
-                "total_count": len(combined_transactions)
-            }, status=status.HTTP_200_OK)
-        except plaid.ApiException as e:
-            return Response(parse_plaid_error(e), status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({"error_message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        unique_securities = {s['security_id']: s for s in combined_securities}.values()
+
+        return Response({
+            "investment_transactions": combined_transactions,
+            "securities": list(unique_securities),
+            "total_count": len(combined_transactions)
+        }, status=status.HTTP_200_OK)
 
 
 class PlaidItemListView(APIView):

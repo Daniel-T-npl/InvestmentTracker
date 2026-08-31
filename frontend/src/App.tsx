@@ -58,49 +58,65 @@ export default function App() {
     setLoading(true)
     setError(null)
     try {
+      // Helper for safe JSON fetching without JSON syntax errors
+      const safeFetchJson = async (url: string) => {
+        try {
+          const res = await fetch(url)
+          const contentType = res.headers.get('content-type') || ''
+          if (contentType.includes('application/json')) {
+            const data = await res.json()
+            return { ok: res.ok, status: res.status, data }
+          }
+          const text = await res.text()
+          return { ok: false, status: res.status, data: null, errorText: text }
+        } catch (e: any) {
+          return { ok: false, status: 0, data: null, errorText: e.message }
+        }
+      }
+
       // 1. Fetch connected items
-      const itemsRes = await fetch('/api/plaid/items/')
-      const itemsData = await itemsRes.json()
-      const connectedItems: PlaidItemRecord[] = itemsData.items || []
+      const itemsRes = await safeFetchJson('/api/plaid/items/')
+      const connectedItems: PlaidItemRecord[] = (itemsRes.data && itemsRes.data.items) || []
       setItems(connectedItems)
 
       if (connectedItems.length > 0) {
         // 2. Fetch Holdings & Accounts
-        const holdingsRes = await fetch('/api/plaid/holdings/')
-        const holdingsData = await holdingsRes.json()
-
+        const holdingsRes = await safeFetchJson('/api/plaid/holdings/')
         let fetchedHoldings: Holding[] = []
         let secMap: Record<string, Security> = {}
 
-        if (holdingsRes.ok) {
-          setAccounts(holdingsData.accounts || [])
-          fetchedHoldings = holdingsData.holdings || []
+        if (holdingsRes.ok && holdingsRes.data) {
+          setAccounts(holdingsRes.data.accounts || [])
+          fetchedHoldings = holdingsRes.data.holdings || []
           setHoldings(fetchedHoldings)
 
           // Index securities by security_id
-          for (const s of holdingsData.securities || []) {
+          for (const s of holdingsRes.data.securities || []) {
             secMap[s.security_id] = s
           }
           setSecurities(secMap)
+        } else if (!holdingsRes.ok && holdingsRes.data?.error_message) {
+          setError(holdingsRes.data.error_message)
         }
 
-        // 3. Fetch Investment Transactions (fetch all available history from inception)
-        const txRes = await fetch('/api/plaid/investment_transactions/?start_date=2020-01-01')
-        const txData = await txRes.json()
-        if (txRes.ok) {
-          setTransactions(txData.investment_transactions || [])
+        // 3. Fetch Investment Transactions
+        const txRes = await safeFetchJson('/api/plaid/investment_transactions/')
+        if (txRes.ok && txRes.data) {
+          setTransactions(txRes.data.investment_transactions || [])
+        } else {
+          setTransactions([])
         }
 
-        setRawPayload({ items: itemsData, holdings: holdingsData, transactions: txData })
+        setRawPayload({ items: itemsRes.data, holdings: holdingsRes.data, transactions: txRes.data })
       } else {
         setAccounts([])
         setHoldings([])
         setSecurities({})
         setTransactions([])
-        setRawPayload({ items: itemsData })
+        setRawPayload({ items: itemsRes.data })
       }
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch Plaid data')
+      setError(err.message || 'Failed to fetch portfolio data')
     } finally {
       setLoading(false)
     }
